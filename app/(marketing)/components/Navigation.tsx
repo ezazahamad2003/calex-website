@@ -40,21 +40,22 @@ const Navigation = () => {
         <div className="flex items-center justify-between h-16 lg:h-20">
           {/* Logo */}
           <motion.div
-            className="flex items-center space-x-3 cursor-pointer"
+            className="flex items-center space-x-4 cursor-pointer"
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
             onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
           >
-            <div className="relative w-8 h-8 lg:w-10 lg:h-10">
+            <div className="relative w-12 h-12 lg:w-20 lg:h-20 bg-accent/10 rounded-lg flex items-center justify-center">
               <Image
                 src="/logowhitecx.png"
                 alt="Calex Logo"
-                fill
-                className="object-contain"
+                width={80}
+                height={80}
+                className="object-contain max-w-full max-h-full"
                 priority
               />
             </div>
-            <span className="text-xl lg:text-2xl font-bold text-primary">
+            <span className="text-2xl lg:text-4xl font-bold text-primary">
               Calex
             </span>
           </motion.div>
