@@ -102,7 +102,7 @@ export async function POST(request: NextRequest) {
     const stats = await getWaitlistStats();
 
     // Log success
-    console.log(`[WAITLIST] New ${validatedData.role} signup:`, {
+    console.log(`[WAITLIST] New ${validatedData.role} signup (Supabase):`, {
       name: validatedData.name,
       email: validatedData.email,
       timestamp: newEntry.created_at,
