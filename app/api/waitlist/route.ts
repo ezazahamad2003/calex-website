@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { promises as fs } from "fs";
-import path from "path";
+import { supabase, supabaseAdmin } from "@/lib/supabase";
+import { Database, WaitlistStats } from "@/types/supabase";
 
 // Validation schemas
 const founderSchema = z.object({
@@ -20,73 +20,46 @@ const lawyerSchema = z.object({
 
 const waitlistSchema = z.union([founderSchema, lawyerSchema]);
 
-interface WaitlistEntry {
-  id: string;
-  name: string;
-  email: string;
-  company?: string;
-  firm?: string;
-  role: "founder" | "lawyer";
-  timestamp: string;
-  ip?: string;
-  userAgent?: string;
+
+// Helper function to get waitlist entries from Supabase
+async function getWaitlistEntries() {
+  const { data, error } = await supabase
+    .from('waitlist_entries')
+    .select('*')
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to fetch waitlist entries: ${error.message}`);
+  }
+
+  return data || [];
 }
 
-interface WaitlistData {
-  entries: WaitlistEntry[];
-  stats: {
-    total: number;
-    founders: number;
-    lawyers: number;
-    lastUpdated: string;
+// Helper function to get waitlist statistics
+async function getWaitlistStats(): Promise<WaitlistStats> {
+  const entries = await getWaitlistEntries();
+  
+  return {
+    total: entries.length,
+    founders: entries.filter(entry => entry.role === 'founder').length,
+    lawyers: entries.filter(entry => entry.role === 'lawyer').length,
+    lastUpdated: new Date().toISOString(),
   };
 }
 
-// Helper function to get or create waitlist file
-async function getWaitlistData(): Promise<WaitlistData> {
-  const dataDir = path.join(process.cwd(), "data");
-  const filePath = path.join(dataDir, "waitlist.json");
-
-  try {
-    // Ensure data directory exists
-    await fs.mkdir(dataDir, { recursive: true });
-
-    // Try to read existing file
-    const fileContent = await fs.readFile(filePath, "utf-8");
-    return JSON.parse(fileContent);
-  } catch (error) {
-    // File doesn't exist or is invalid, create new structure
-    const initialData: WaitlistData = {
-      entries: [],
-      stats: {
-        total: 0,
-        founders: 0,
-        lawyers: 0,
-        lastUpdated: new Date().toISOString(),
-      },
-    };
-    
-    await fs.writeFile(filePath, JSON.stringify(initialData, null, 2));
-    return initialData;
-  }
-}
-
-// Helper function to save waitlist data
-async function saveWaitlistData(data: WaitlistData): Promise<void> {
-  const dataDir = path.join(process.cwd(), "data");
-  const filePath = path.join(dataDir, "waitlist.json");
-  
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2));
-}
-
 // Helper function to check if email already exists
-function emailExists(entries: WaitlistEntry[], email: string): boolean {
-  return entries.some(entry => entry.email.toLowerCase() === email.toLowerCase());
-}
+async function emailExists(email: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('waitlist_entries')
+    .select('id')
+    .eq('email', email.toLowerCase())
+    .single();
 
-// Helper function to generate unique ID
-function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned
+    throw new Error(`Failed to check email existence: ${error.message}`);
+  }
+
+  return !!data;
 }
 
 export async function POST(request: NextRequest) {
@@ -95,45 +68,44 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const validatedData = waitlistSchema.parse(body);
 
-    // Get current waitlist data
-    const waitlistData = await getWaitlistData();
-
     // Check if email already exists
-    if (emailExists(waitlistData.entries, validatedData.email)) {
+    if (await emailExists(validatedData.email)) {
       return NextResponse.json(
         { error: "Email already registered on waitlist" },
         { status: 400 }
       );
     }
 
-    // Create new entry
-    const newEntry: WaitlistEntry = {
-      id: generateId(),
+    // Prepare data for Supabase
+    const insertData = {
       name: validatedData.name,
-      email: validatedData.email,
+      email: validatedData.email.toLowerCase(),
       ...(validatedData.role === "founder" && { company: validatedData.company }),
       ...(validatedData.role === "lawyer" && { firm: validatedData.firm }),
       role: validatedData.role,
-      timestamp: new Date().toISOString(),
-      ip: request.headers.get("x-forwarded-for") || "unknown",
-      userAgent: request.headers.get("user-agent") || "unknown",
+      ip_address: request.headers.get("x-forwarded-for") || "unknown",
+      user_agent: request.headers.get("user-agent") || "unknown",
     };
 
-    // Add entry and update stats
-    waitlistData.entries.push(newEntry);
-    waitlistData.stats.total = waitlistData.entries.length;
-    waitlistData.stats.founders = waitlistData.entries.filter(e => e.role === "founder").length;
-    waitlistData.stats.lawyers = waitlistData.entries.filter(e => e.role === "lawyer").length;
-    waitlistData.stats.lastUpdated = new Date().toISOString();
+    // Insert new entry into Supabase
+    const { data: newEntry, error: insertError } = await supabase
+      .from('waitlist_entries')
+      .insert(insertData)
+      .select()
+      .single();
 
-    // Save updated data
-    await saveWaitlistData(waitlistData);
+    if (insertError) {
+      throw new Error(`Failed to insert waitlist entry: ${insertError.message}`);
+    }
 
-    // Log success (in production, you might want to use a proper logger)
+    // Get updated stats
+    const stats = await getWaitlistStats();
+
+    // Log success
     console.log(`[WAITLIST] New ${validatedData.role} signup:`, {
       name: validatedData.name,
       email: validatedData.email,
-      timestamp: newEntry.timestamp,
+      timestamp: newEntry.created_at,
     });
 
     // Return success response
@@ -142,8 +114,8 @@ export async function POST(request: NextRequest) {
       message: "Successfully added to waitlist",
       id: newEntry.id,
       stats: {
-        total: waitlistData.stats.total,
-        position: waitlistData.stats.total,
+        total: stats.total,
+        position: stats.total,
       },
     });
 
@@ -164,6 +136,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Handle database errors
+    if (error instanceof Error) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: 500 }
+      );
+    }
+
     // Handle other errors
     return NextResponse.json(
       { error: "Internal server error" },
@@ -174,11 +154,11 @@ export async function POST(request: NextRequest) {
 
 export async function GET() {
   try {
-    const waitlistData = await getWaitlistData();
+    const stats = await getWaitlistStats();
     
     // Return public stats only (no personal data)
     return NextResponse.json({
-      stats: waitlistData.stats,
+      stats,
     });
   } catch (error) {
     console.error("[WAITLIST] Error fetching stats:", error);
@@ -212,27 +192,23 @@ export async function DELETE(request: NextRequest) {
   }
 
   try {
-    const waitlistData = await getWaitlistData();
-    const initialCount = waitlistData.entries.length;
-    
-    waitlistData.entries = waitlistData.entries.filter(
-      entry => entry.email.toLowerCase() !== email.toLowerCase()
-    );
-    
-    if (waitlistData.entries.length === initialCount) {
+    // Delete entry from Supabase
+    const { data, error } = await supabaseAdmin
+      .from('waitlist_entries')
+      .delete()
+      .eq('email', email.toLowerCase())
+      .select();
+
+    if (error) {
+      throw new Error(`Failed to delete waitlist entry: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) {
       return NextResponse.json(
         { error: "Email not found" },
         { status: 404 }
       );
     }
-
-    // Update stats
-    waitlistData.stats.total = waitlistData.entries.length;
-    waitlistData.stats.founders = waitlistData.entries.filter(e => e.role === "founder").length;
-    waitlistData.stats.lawyers = waitlistData.entries.filter(e => e.role === "lawyer").length;
-    waitlistData.stats.lastUpdated = new Date().toISOString();
-
-    await saveWaitlistData(waitlistData);
 
     return NextResponse.json({
       success: true,
